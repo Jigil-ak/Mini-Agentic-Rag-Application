@@ -9,6 +9,7 @@ Routing logic:
     similarity >= SIMILARITY_THRESHOLD → RAG path (use knowledge base)
     similarity <  SIMILARITY_THRESHOLD → Tool path (web search / calculator)
     empty collection                   → Tool path (no knowledge to search)
+    Milvus unavailable                 → Tool path (graceful degradation)
 """
 
 import logging
@@ -16,7 +17,12 @@ from typing import Dict
 
 from backend.config import SIMILARITY_THRESHOLD, TOP_K
 from backend.ingestion.embedding import embed_query
-from backend.vectordb.milvus_client import search_documents, collection_exists, get_document_count
+from backend.vectordb.milvus_client import (
+    search_documents,
+    collection_exists,
+    get_document_count,
+    is_available,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +31,7 @@ class RouterAgent:
     """Routes user queries to the appropriate agent based on retrieval similarity.
 
     The router is stateless — all configuration comes from backend.config.
+    This class never raises exceptions; it always returns a valid routing dict.
     """
 
     def __init__(self) -> None:
@@ -32,6 +39,10 @@ class RouterAgent:
 
     def route(self, query: str) -> Dict:
         """Analyse the query against the knowledge base and decide the path.
+
+        This method is designed to NEVER raise an exception. If Milvus is
+        unavailable, the collection is empty, or any error occurs during
+        retrieval, it gracefully falls back to the tool path.
 
         Args:
             query: The user's question.
@@ -43,19 +54,55 @@ class RouterAgent:
                 reason (str): Human-readable explanation of routing decision
                 top_chunk_preview (str): First 100 chars of top chunk, or ""
         """
+        # ── Handle Milvus unavailable ──────────────────────────────────
+        try:
+            milvus_ready = is_available()
+        except Exception:
+            milvus_ready = False
+
+        if not milvus_ready:
+            logger.info("Router: Milvus is not available — routing to tool")
+            return {
+                "path": "tool",
+                "similarity_score": 0.0,
+                "reason": "Knowledge base is empty, routing to external tools.",
+                "top_chunk_preview": "",
+            }
+
         # ── Handle empty knowledge base ────────────────────────────────
-        if not collection_exists() or get_document_count() == 0:
+        try:
+            has_collection = collection_exists()
+            doc_count = get_document_count() if has_collection else 0
+        except Exception as exc:
+            logger.warning("Router: failed to check collection status: %s", exc)
+            return {
+                "path": "tool",
+                "similarity_score": 0.0,
+                "reason": "Knowledge base is empty, routing to external tools.",
+                "top_chunk_preview": "",
+            }
+
+        if not has_collection or doc_count == 0:
             logger.info("Router: knowledge base is empty — routing to tool")
             return {
                 "path": "tool",
                 "similarity_score": 0.0,
-                "reason": "Knowledge base is empty",
+                "reason": "Knowledge base is empty, routing to external tools.",
                 "top_chunk_preview": "",
             }
 
         # ── Embed query and search ─────────────────────────────────────
-        query_embedding = embed_query(query)
-        results = search_documents(query_embedding, top_k=1)
+        try:
+            query_embedding = embed_query(query)
+            results = search_documents(query_embedding, top_k=1)
+        except Exception as exc:
+            logger.warning("Router: search failed: %s — routing to tool", exc)
+            return {
+                "path": "tool",
+                "similarity_score": 0.0,
+                "reason": f"Search failed ({exc}), routing to external tools.",
+                "top_chunk_preview": "",
+            }
 
         # No results from search
         if not results:

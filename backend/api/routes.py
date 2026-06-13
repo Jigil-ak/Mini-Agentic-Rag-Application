@@ -28,6 +28,7 @@ from backend.vectordb.milvus_client import (
     insert_documents,
     get_document_count,
     collection_exists,
+    is_available,
 )
 from backend.tracing.tracer import TraceManager
 
@@ -90,6 +91,8 @@ async def query_endpoint(request: QueryRequest):
     2. Route the query (RAG vs Tool)
     3. Execute the chosen agent
     4. Finish the trace and return the result
+
+    Never lets raw exceptions bubble up — always returns structured JSON.
     """
     query = request.query.strip()
     trace_id = _trace_manager.start_trace(query)
@@ -141,7 +144,10 @@ async def query_endpoint(request: QueryRequest):
             _trace_manager.finish_trace(trace_id)
         except Exception:
             pass
-        raise HTTPException(status_code=500, detail=f"Query processing failed: {exc}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Query processing failed: {exc}",
+        )
 
 
 # ── POST /load ─────────────────────────────────────────────────────────────
@@ -219,15 +225,29 @@ async def load_endpoint(
 
 @router.get("/health", response_model=HealthResponse)
 async def health_endpoint():
-    """Health check — reports Milvus connection status and document count."""
+    """Health check — reports Milvus connection status and document count.
+
+    Always returns HTTP 200, even when Milvus is unavailable.
+    The milvus field indicates the connection status.
+    """
     try:
+        if not is_available():
+            return HealthResponse(
+                status="ok",
+                milvus="error - milvus_lite not installed",
+                documents_indexed=0,
+            )
+
         exists = collection_exists()
         doc_count = get_document_count() if exists else 0
         milvus_status = "connected"
     except Exception as exc:
-        logger.error("Health check failed: %s", exc)
-        milvus_status = f"error: {exc}"
-        doc_count = 0
+        logger.error("Health check — Milvus error: %s", exc)
+        return HealthResponse(
+            status="ok",
+            milvus=f"error - {exc}",
+            documents_indexed=0,
+        )
 
     return HealthResponse(
         status="ok",

@@ -12,6 +12,7 @@ IMPORTANT — Similarity Score Handling:
 """
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -23,18 +24,34 @@ logger = logging.getLogger(__name__)
 
 # ── Singleton client ───────────────────────────────────────────────────────
 _client: MilvusClient | None = None
+_client_available: bool = False
 
 
 def _get_client() -> MilvusClient:
-    """Lazily create the MilvusClient pointing at the local DB file."""
-    global _client
-    if _client is None:
-        # Ensure the parent directory exists
-        db_path = Path(MILVUS_DB_PATH)
-        db_path.parent.mkdir(parents=True, exist_ok=True)
+    """Lazily create the MilvusClient pointing at the local DB file.
 
-        logger.info("Connecting to Milvus Lite at %s", MILVUS_DB_PATH)
-        _client = MilvusClient(MILVUS_DB_PATH)
+    Raises:
+        RuntimeError: If the Milvus Lite client cannot be initialised
+                       (e.g. milvus_lite package not installed).
+    """
+    global _client, _client_available
+    if _client is None:
+        try:
+            # Ensure the parent directory exists before connecting
+            db_path = Path(MILVUS_DB_PATH)
+            os.makedirs(str(db_path.parent), exist_ok=True)
+
+            logger.info("Connecting to Milvus Lite at %s", MILVUS_DB_PATH)
+            _client = MilvusClient(MILVUS_DB_PATH)
+            _client_available = True
+            logger.info("Milvus Lite client initialised successfully")
+        except Exception as exc:
+            _client_available = False
+            _client = None
+            raise RuntimeError(
+                f"Failed to initialise Milvus Lite client at '{MILVUS_DB_PATH}': {exc}. "
+                f"Ensure milvus_lite is installed: pip install 'pymilvus[milvus_lite]'"
+            ) from exc
     return _client
 
 
@@ -69,6 +86,23 @@ def _build_schema() -> CollectionSchema:
 
 
 # ── Public API ─────────────────────────────────────────────────────────────
+
+def is_available() -> bool:
+    """Check whether the Milvus Lite client is available and functional.
+
+    Attempts to connect if not already connected. Returns True if the
+    client initialised successfully, False otherwise. Never raises.
+    """
+    global _client_available
+    if _client is not None:
+        return _client_available
+    try:
+        _get_client()
+        return True
+    except Exception as exc:
+        logger.warning("Milvus is not available: %s", exc)
+        return False
+
 
 def ensure_collection() -> None:
     """Create the collection with IVF_FLAT + COSINE index if it doesn't exist."""

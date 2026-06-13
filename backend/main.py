@@ -3,6 +3,9 @@ FastAPI application entry point.
 
 Creates the app, configures CORS, includes routes, and ensures
 required directories and the Milvus collection exist on startup.
+
+Startup validation checks and logs Milvus connection, collection status,
+and embedding model availability — but never crashes on failure.
 """
 
 import logging
@@ -13,8 +16,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from backend.api.routes import router
-from backend.config import FASTAPI_PORT
-from backend.vectordb.milvus_client import ensure_collection
+from backend.config import FASTAPI_PORT, COLLECTION_NAME
+from backend.vectordb.milvus_client import ensure_collection, is_available
 
 # ── Logging configuration ─────────────────────────────────────────────────
 logging.basicConfig(
@@ -38,12 +41,31 @@ async def lifespan(app: FastAPI):
     Path("logs").mkdir(exist_ok=True)
     logger.info("Ensured data/ and logs/ directories exist")
 
-    # Initialise Milvus collection
+    # ── Validate Milvus connection ─────────────────────────────────
     try:
-        ensure_collection()
-        logger.info("Milvus collection ready")
+        if is_available():
+            logger.info("✅ Milvus connected successfully")
+            try:
+                ensure_collection()
+                logger.info("✅ Collection '%s' ready", COLLECTION_NAME)
+            except Exception as exc:
+                logger.error("❌ Failed to ensure collection '%s': %s", COLLECTION_NAME, exc)
+        else:
+            logger.warning("❌ Milvus unavailable: milvus_lite may not be installed. "
+                           "Install with: pip install 'pymilvus[milvus_lite]'")
     except Exception as exc:
-        logger.error("Failed to initialise Milvus collection: %s", exc)
+        logger.error("❌ Milvus unavailable: %s", exc)
+
+    # ── Validate embedding model ───────────────────────────────────
+    try:
+        from backend.ingestion.embedding import embed_query
+        test_embedding = embed_query("startup test")
+        if test_embedding and len(test_embedding) == 384:
+            logger.info("✅ Embedding model loaded (dimension: 384)")
+        else:
+            logger.warning("❌ Embedding model returned unexpected output")
+    except Exception as exc:
+        logger.error("❌ Embedding model failed to load: %s", exc)
 
     logger.info("Agentic RAG application started successfully")
     yield

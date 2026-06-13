@@ -6,6 +6,7 @@ from backend.vectordb.milvus_client import (
     search_documents,
     get_document_count,
     collection_exists,
+    is_available,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "search_documents",
     "get_document_count",
     "collection_exists",
+    "is_available",
 ]
