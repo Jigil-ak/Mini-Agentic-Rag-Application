@@ -1,60 +1,58 @@
 """
 Web search tool using DuckDuckGo via the duckduckgo-search package.
-
-Performs text searches with no API key required. Results are formatted
-as a numbered list suitable for inclusion in LLM prompts.
 """
 
 import logging
-from typing import List
-
 from duckduckgo_search import DDGS
 
 logger = logging.getLogger(__name__)
 
 
-def search(query: str, max_results: int = 3) -> str:
-    """Search the web using DuckDuckGo and return formatted results.
+def _strip_non_ascii(text: str) -> str:
+    """Helper to remove non-ASCII characters from search result fields."""
+    if not text:
+        return ""
+    return "".join(c for c in text if ord(c) < 128)
 
-    Args:
-        query: The search query string.
-        max_results: Maximum number of results to return (default: 3).
 
-    Returns:
-        A formatted string of numbered results, each with title, snippet,
-        and URL. Returns "No search results found." if nothing is found.
+class WebSearchTool:
+    """Web search tool class using the DDGS client directly."""
 
-    Raises:
-        ValueError: If the query is empty or whitespace-only.
-    """
-    if not query or not query.strip():
-        raise ValueError("Search query cannot be empty")
+    def search(self, query: str, max_results: int = 3) -> str:
+        """Perform a web search and format results as a numbered list.
 
-    query = query.strip()
-    logger.info("Web search: '%s' (max_results=%d)", query, max_results)
+        Args:
+            query: The search query.
+            max_results: Max results to fetch.
 
-    try:
-        results: List[dict] = []
-        with DDGS() as ddgs:
-            for result in ddgs.text(query, max_results=max_results):
-                results.append(result)
+        Returns:
+            A formatted string list of results or a fallback message if failed.
+        """
+        print(f"[WebSearch] Searching for: {query}")
+        try:
+            results = []
+            with DDGS() as ddgs:
+                ddgs_generator = ddgs.text(query, max_results=max_results)
+                if ddgs_generator:
+                    for r in ddgs_generator:
+                        results.append(r)
 
-    except Exception as exc:
-        logger.warning("DuckDuckGo search failed: %s", exc)
-        return f"Web search failed: {exc}"
+            n = len(results)
+            print(f"[WebSearch] Found {n} results")
 
-    if not results:
-        logger.info("No results found for query: '%s'", query)
-        return "No search results found."
+            if not results:
+                return "No search results found."
 
-    # Format as numbered list
-    formatted_lines: List[str] = []
-    for idx, result in enumerate(results, start=1):
-        title = result.get("title", "No title")
-        body = result.get("body", "No description")
-        href = result.get("href", "No URL")
-        formatted_lines.append(f"{idx}. [{title}]: {body}\n   URL: {href}")
+            formatted_results = []
+            for idx, r in enumerate(results, start=1):
+                title = _strip_non_ascii(r.get("title", ""))
+                snippet = _strip_non_ascii(r.get("body", ""))
+                url = _strip_non_ascii(r.get("href", ""))
+                formatted_results.append(f"{idx}. [{title}]: {snippet}\nURL: {url}\n")
 
-    output = "\n\n".join(formatted_lines)
-    logger.info("Found %d search results", len(results))
-    return output
+            return "\n".join(formatted_results)
+
+        except Exception as exc:
+            print(f"[WebSearch] Search failed: {exc}")
+            logger.error("DuckDuckGo web search encountered an exception: %s", exc)
+            return "No search results found."

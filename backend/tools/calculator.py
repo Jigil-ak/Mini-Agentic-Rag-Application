@@ -139,3 +139,12 @@ def calculate(expression: str) -> str:
         return str(int(result))
 
     return str(result)
+
+
+class CalculatorTool:
+    """Class wrapper for the calculator tool."""
+
+    def calculate(self, expression: str) -> str:
+        """Evaluate mathematical expression safely."""
+        return calculate(expression)
+
