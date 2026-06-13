@@ -112,7 +112,7 @@ class TestSecurityPrevention:
             calculate("'hello'")
 
     def test_list_comprehension_blocked(self):
-        with pytest.raises(ValueError, match="Invalid expression syntax"):
+        with pytest.raises(ValueError, match="Unsafe expression"):
             calculate("[x for x in range(10)]")
 
 
