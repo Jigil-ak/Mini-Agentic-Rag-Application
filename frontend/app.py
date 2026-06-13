@@ -12,7 +12,7 @@ import streamlit as st
 
 # ── Configuration ──────────────────────────────────────────────────────────
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = "http://127.0.0.1:8000"
 
 # ── Page config ────────────────────────────────────────────────────────────
 
@@ -63,19 +63,20 @@ def get_health():
         resp = requests.get(f"{BASE_URL}/health", timeout=5)
         if resp.status_code == 200:
             return resp.json()
-    except requests.exceptions.ConnectionError:
-        return None
     except Exception:
         return None
     return None
 
 
-def post_query(query: str):
+def post_query(query: str, source: str = None):
     """Send a query to the backend and return the response."""
     try:
+        payload = {"query": query}
+        if source:
+            payload["source"] = source
         resp = requests.post(
             f"{BASE_URL}/query",
-            json={"query": query},
+            json=payload,
             timeout=120,
         )
         if resp.status_code == 200:
@@ -89,41 +90,6 @@ def post_query(query: str):
         return None, f"Request failed: {exc}"
 
 
-def post_load_pdf(file):
-    """Upload a PDF file to the backend."""
-    try:
-        files = {"file": (file.name, file.getvalue(), "application/pdf")}
-        resp = requests.post(f"{BASE_URL}/load", files=files, timeout=120)
-        if resp.status_code == 200:
-            return resp.json(), None
-        else:
-            detail = resp.json().get("detail", "Unknown error")
-            return None, f"Error {resp.status_code}: {detail}"
-    except requests.exceptions.ConnectionError:
-        return None, "Cannot connect to backend. Is the FastAPI server running?"
-    except Exception as exc:
-        return None, f"Upload failed: {exc}"
-
-
-def post_load_url(url: str):
-    """Submit a URL for ingestion to the backend."""
-    try:
-        resp = requests.post(
-            f"{BASE_URL}/load",
-            data={"url": url},
-            timeout=120,
-        )
-        if resp.status_code == 200:
-            return resp.json(), None
-        else:
-            detail = resp.json().get("detail", "Unknown error")
-            return None, f"Error {resp.status_code}: {detail}"
-    except requests.exceptions.ConnectionError:
-        return None, "Cannot connect to backend. Is the FastAPI server running?"
-    except Exception as exc:
-        return None, f"URL ingestion failed: {exc}"
-
-
 def get_traces():
     """Fetch recent traces from the backend."""
     try:
@@ -133,6 +99,19 @@ def get_traces():
     except Exception:
         pass
     return []
+
+
+# ── Ingestion Result Message Handler ──────────────────────────────────────
+
+# Render any load results from the previous run
+if "upload_message" in st.session_state and st.session_state["upload_message"]:
+    if st.session_state.get("upload_success"):
+        st.success(st.session_state["upload_message"])
+    else:
+        st.error(st.session_state["upload_message"])
+    # Reset message states
+    st.session_state["upload_message"] = None
+    st.session_state["upload_success"] = None
 
 
 # ── Sidebar ────────────────────────────────────────────────────────────────
@@ -169,14 +148,21 @@ with st.sidebar:
         if uploaded_file is not None:
             if st.button("📤 Load PDF", key="load_pdf", use_container_width=True):
                 with st.spinner("Processing PDF..."):
-                    result, error = post_load_pdf(uploaded_file)
-                if error:
-                    st.error(error)
-                else:
-                    st.success(
-                        f"✅ Loaded **{result['chunks_loaded']}** chunks "
-                        f"from `{result['source']}`"
-                    )
+                    try:
+                        files = {"file": (uploaded_file.name, uploaded_file.getvalue(), "application/pdf")}
+                        response = requests.post(f"{BASE_URL}/load", files=files, timeout=120)
+                        if response.status_code == 200:
+                            data = response.json()
+                            st.session_state["upload_message"] = f"✅ Loaded {data['chunks_loaded']} chunks from {data['source']}"
+                            st.session_state["upload_success"] = True
+                            st.session_state["active_source"] = data['source']
+                        else:
+                            st.session_state["upload_message"] = f"❌ {response.status_code}: {response.text}"
+                            st.session_state["upload_success"] = False
+                    except Exception as exc:
+                        st.session_state["upload_message"] = f"❌ Connection error: {exc}"
+                        st.session_state["upload_success"] = False
+                st.rerun()
 
     with url_tab:
         url_input = st.text_input(
@@ -186,15 +172,54 @@ with st.sidebar:
         )
         if url_input:
             if st.button("🌐 Load URL", key="load_url", use_container_width=True):
-                with st.spinner("Fetching and processing URL..."):
-                    result, error = post_load_url(url_input)
-                if error:
-                    st.error(error)
+                with st.spinner("Processing URL..."):
+                    try:
+                        response = requests.post(
+                            f"{BASE_URL}/load",
+                            data={"url": url_input},
+                            timeout=120,
+                        )
+                        if response.status_code == 200:
+                            data = response.json()
+                            st.session_state["upload_message"] = f"✅ Loaded {data['chunks_loaded']} chunks from {data['source']}"
+                            st.session_state["upload_success"] = True
+                            st.session_state["active_source"] = data['source']
+                        else:
+                            st.session_state["upload_message"] = f"❌ {response.status_code}: {response.text}"
+                            st.session_state["upload_success"] = False
+                    except Exception as exc:
+                        st.session_state["upload_message"] = f"❌ Connection error: {exc}"
+                        st.session_state["upload_success"] = False
+                st.rerun()
+
+    st.markdown("---")
+
+    # Active Source UI
+    active_source = st.session_state.get("active_source")
+    if active_source:
+        st.markdown("### 🎯 Active Document")
+        st.info(f"Searching only in:\n**{active_source}**")
+        if st.button("✖️ Clear Active Document", use_container_width=True):
+            st.session_state.pop("active_source", None)
+            st.rerun()
+
+    st.markdown("---")
+
+    # Database Reset
+    st.markdown("### ⚠️ Danger Zone")
+    if st.button("🗑️ Clear Vector Database", type="primary", use_container_width=True):
+        with st.spinner("Clearing database..."):
+            try:
+                response = requests.post(f"{BASE_URL}/reset", timeout=30)
+                if response.status_code == 200:
+                    st.success("✅ Vector database cleared!")
+                    st.session_state.pop("upload_message", None)
+                    st.session_state.pop("active_source", None)
+                    st.rerun()
                 else:
-                    st.success(
-                        f"✅ Loaded **{result['chunks_loaded']}** chunks "
-                        f"from URL"
-                    )
+                    st.error(f"❌ Failed to clear: {response.text}")
+            except Exception as exc:
+                st.error(f"❌ Connection error: {exc}")
 
     st.markdown("---")
     st.markdown(
@@ -231,7 +256,8 @@ with col_btn:
 
 if ask_clicked and query and query.strip():
     with st.spinner("🔄 Processing your query..."):
-        result, error = post_query(query.strip())
+        source_to_use = st.session_state.get("active_source")
+        result, error = post_query(query.strip(), source=source_to_use)
 
     if error:
         st.error(f"❌ {error}")
