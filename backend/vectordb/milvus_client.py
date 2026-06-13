@@ -14,20 +14,26 @@ IMPORTANT — Similarity Score Handling:
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from pymilvus import CollectionSchema, DataType, FieldSchema, MilvusClient
+# Try importing from pymilvus safely to prevent import-time crashes if pymilvus
+# or any of its C-extensions/milvus-lite components are missing or broken.
+try:
+    from pymilvus import CollectionSchema, DataType, FieldSchema, MilvusClient
+    _pymilvus_import_error = None
+except Exception as e:
+    _pymilvus_import_error = e
 
 from backend.config import COLLECTION_NAME, MILVUS_DB_PATH
 
 logger = logging.getLogger(__name__)
 
 # ── Singleton client ───────────────────────────────────────────────────────
-_client: MilvusClient | None = None
+_client: Any = None
 _client_available: bool = False
 
 
-def _get_client() -> MilvusClient:
+def _get_client() -> Any:
     """Lazily create the MilvusClient pointing at the local DB file.
 
     Raises:
@@ -35,23 +41,33 @@ def _get_client() -> MilvusClient:
                        (e.g. milvus_lite package not installed).
     """
     global _client, _client_available
-    if _client is None:
-        try:
-            # Ensure the parent directory exists before connecting
-            db_path = Path(MILVUS_DB_PATH)
-            os.makedirs(str(db_path.parent), exist_ok=True)
+    if _client is not None:
+        return _client
 
-            logger.info("Connecting to Milvus Lite at %s", MILVUS_DB_PATH)
-            _client = MilvusClient(MILVUS_DB_PATH)
-            _client_available = True
-            logger.info("Milvus Lite client initialised successfully")
-        except Exception as exc:
-            _client_available = False
-            _client = None
-            raise RuntimeError(
-                f"Failed to initialise Milvus Lite client at '{MILVUS_DB_PATH}': {exc}. "
-                f"Ensure milvus_lite is installed: pip install 'pymilvus[milvus_lite]'"
-            ) from exc
+    if _pymilvus_import_error is not None:
+        _client_available = False
+        raise RuntimeError(
+            f"Failed to import pymilvus or its dependencies: {_pymilvus_import_error}. "
+            "Ensure milvus_lite is installed: pip install 'pymilvus[milvus_lite]'"
+        )
+
+    try:
+        # Ensure the parent directory exists before connecting
+        db_path = Path(MILVUS_DB_PATH)
+        os.makedirs(str(db_path.parent), exist_ok=True)
+
+        logger.info("Connecting to Milvus Lite at %s", MILVUS_DB_PATH)
+        _client = MilvusClient(MILVUS_DB_PATH)
+        _client_available = True
+        logger.info("Milvus Lite client initialised successfully")
+    except Exception as exc:
+        _client_available = False
+        _client = None
+        raise RuntimeError(
+            f"Failed to initialise Milvus Lite client at '{MILVUS_DB_PATH}': {exc}. "
+            "Ensure milvus_lite is installed: pip install 'pymilvus[milvus_lite]'"
+        ) from exc
+
     return _client
 
 
@@ -59,6 +75,10 @@ def _get_client() -> MilvusClient:
 
 def _build_schema() -> CollectionSchema:
     """Build the collection schema with id, text, embedding, source fields."""
+    if _pymilvus_import_error is not None:
+        raise RuntimeError(
+            f"Cannot build schema because pymilvus failed to import: {_pymilvus_import_error}"
+        )
     fields = [
         FieldSchema(
             name="id",
@@ -98,7 +118,7 @@ def is_available() -> bool:
         return _client_available
     try:
         _get_client()
-        return True
+        return _client_available
     except Exception as exc:
         logger.warning("Milvus is not available: %s", exc)
         return False
@@ -181,12 +201,14 @@ def insert_documents(
 def search_documents(
     query_embedding: List[float],
     top_k: int = 3,
+    source: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Search for the most similar documents to the query embedding.
 
     Args:
         query_embedding: 384-dimensional query vector.
         top_k: Number of results to return.
+        source: Optional source string to restrict the search.
 
     Returns:
         List of dicts with keys: text, source, distance, similarity.
@@ -195,33 +217,63 @@ def search_documents(
     """
     client = _get_client()
 
-    raw_results = client.search(
-        collection_name=COLLECTION_NAME,
-        data=[query_embedding],
-        limit=top_k,
-        output_fields=["text", "source"],
-        search_params={"metric_type": "COSINE", "params": {"nprobe": 16}},
-    )
+    # Crucial: explicit load_collection call to guarantee collection is in memory
+    try:
+        client.load_collection(COLLECTION_NAME)
+        logger.info("[MilvusClient] Collection '%s' loaded into memory successfully", COLLECTION_NAME)
+    except Exception as exc:
+        logger.warning("[MilvusClient] Failed to load collection '%s': %s", COLLECTION_NAME, exc)
 
-    results: List[Dict[str, Any]] = []
+    # Prepare search arguments
+    search_kwargs = {
+        "collection_name": COLLECTION_NAME,
+        "data": [query_embedding],
+        "limit": top_k,
+        "output_fields": ["text", "source"],
+    }
+    if source:
+        search_kwargs["filter"] = f'source == "{source}"'
 
-    if not raw_results or not raw_results[0]:
-        return results
-
-    for hit in raw_results[0]:
-        distance = hit.get("distance", 1.0)
-        similarity = 1.0 - distance  # normalise: 1.0 = identical
-        entity = hit.get("entity", {})
-        results.append(
-            {
-                "text": entity.get("text", ""),
-                "source": entity.get("source", ""),
-                "distance": distance,
-                "similarity": round(similarity, 6),
-            }
+    # Wrap client search in try/except with fallback
+    try:
+        search_results = client.search(
+            **search_kwargs,
+            search_params={"metric_type": "COSINE", "params": {"nprobe": 16}},
         )
+    except Exception as exc:
+        logger.warning(
+            "[MilvusClient] Search with custom parameters failed: %s. Falling back to empty search params.",
+            exc,
+        )
+        try:
+            search_results = client.search(
+                **search_kwargs,
+                search_params={},
+            )
+        except Exception as fallback_exc:
+            logger.error("[MilvusClient] Fallback search failed: %s", fallback_exc)
+            raise fallback_exc
 
-    return results
+    formatted_hits: List[Dict[str, Any]] = []
+
+    if search_results and len(search_results) > 0:
+        for hit in search_results[0]:
+            # Handle both dictionary-key access and object-attribute access seamlessly
+            distance = hit.get("distance", 1.0) if isinstance(hit, dict) else getattr(hit, "distance", 1.0)
+            entity = hit.get("entity", {}) if isinstance(hit, dict) else getattr(hit, "entity", {})
+            
+            text = entity.get("text", "") if isinstance(entity, dict) else getattr(entity, "text", "")
+            source = entity.get("source", "") if isinstance(entity, dict) else getattr(entity, "source", "")
+            
+            normalized_similarity = 1.0 - distance
+            formatted_hits.append({
+                "text": text,
+                "source": source,
+                "distance": distance,
+                "similarity": max(0.0, min(1.0, normalized_similarity))
+            })
+
+    return formatted_hits
 
 
 def get_document_count() -> int:
@@ -241,3 +293,12 @@ def collection_exists() -> bool:
     """Check whether the RAG collection exists."""
     client = _get_client()
     return client.has_collection(COLLECTION_NAME)
+
+
+def reset_collection() -> None:
+    """Drop the collection if it exists and recreate it."""
+    client = _get_client()
+    if client.has_collection(COLLECTION_NAME):
+        client.drop_collection(COLLECTION_NAME)
+        logger.info("Dropped collection '%s'", COLLECTION_NAME)
+    ensure_collection()
