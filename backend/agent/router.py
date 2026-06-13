@@ -1,145 +1,185 @@
 """
 Router agent — decides whether to use RAG or tools for each query.
-
-Embeds the query, searches Milvus for similar documents, and compares
-the top similarity score against the configured threshold to determine
-the execution path.
-
-Routing logic:
-    similarity >= SIMILARITY_THRESHOLD → RAG path (use knowledge base)
-    similarity <  SIMILARITY_THRESHOLD → Tool path (web search / calculator)
-    empty collection                   → Tool path (no knowledge to search)
-    Milvus unavailable                 → Tool path (graceful degradation)
 """
 
+import re
 import logging
 from typing import Dict
 
-from backend.config import SIMILARITY_THRESHOLD, TOP_K
+STRICT_THRESHOLD = 0.6
+SOFT_THRESHOLD = 0.3
 from backend.ingestion.embedding import embed_query
 from backend.vectordb.milvus_client import (
     search_documents,
-    collection_exists,
     get_document_count,
     is_available,
+    collection_exists,
 )
 
 logger = logging.getLogger(__name__)
 
 
 class RouterAgent:
-    """Routes user queries to the appropriate agent based on retrieval similarity.
+    """Decides if a query should go to RAG pipeline or tools based on context similarity."""
 
-    The router is stateless — all configuration comes from backend.config.
-    This class never raises exceptions; it always returns a valid routing dict.
-    """
-
-    def __init__(self) -> None:
-        self._threshold = SIMILARITY_THRESHOLD
-
-    def route(self, query: str) -> Dict:
-        """Analyse the query against the knowledge base and decide the path.
-
-        This method is designed to NEVER raise an exception. If Milvus is
-        unavailable, the collection is empty, or any error occurs during
-        retrieval, it gracefully falls back to the tool path.
+    def route(self, query: str, source: str = None) -> Dict:
+        """Analyze query and route to either RAG or Tool path.
 
         Args:
-            query: The user's question.
+            query: The user query string.
+            source: Optional source document to restrict the search.
 
         Returns:
-            Dict with keys:
-                path (str): "rag" or "tool"
-                similarity_score (float): Normalised 0–1 score (1.0 = identical)
-                reason (str): Human-readable explanation of routing decision
-                top_chunk_preview (str): First 100 chars of top chunk, or ""
+            Dict containing path, similarity_score, reason, and top_chunk_preview.
         """
-        # ── Handle Milvus unavailable ──────────────────────────────────
         try:
-            milvus_ready = is_available()
-        except Exception:
-            milvus_ready = False
+            # 1. Check for strict mathematical intent
+            query_lower = query.lower()
+            has_operators = any(op in query_lower for op in ["+", "-", "*", "/", "^", "%"])
+            has_math_words = any(word in query_lower for word in ["calculate ", "compute "])
+            has_digits = bool(re.search(r'\d', query_lower))
 
-        if not milvus_ready:
-            logger.info("Router: Milvus is not available — routing to tool")
-            return {
-                "path": "tool",
-                "similarity_score": 0.0,
-                "reason": "Knowledge base is empty, routing to external tools.",
-                "top_chunk_preview": "",
-            }
+            # Only trigger the calculator tool path if it is an actual equation or math command
+            if (has_operators and has_digits) or has_math_words:
+                decision = {
+                    "path": "tool",
+                    "similarity_score": 0.0,
+                    "reason": "Mathematical query detected",
+                    "top_chunk_preview": "",
+                }
+                print(f"[Router] Final Routing Decision: {decision}")
+                return decision
 
-        # ── Handle empty knowledge base ────────────────────────────────
-        try:
-            has_collection = collection_exists()
-            doc_count = get_document_count() if has_collection else 0
-        except Exception as exc:
-            logger.warning("Router: failed to check collection status: %s", exc)
-            return {
-                "path": "tool",
-                "similarity_score": 0.0,
-                "reason": "Knowledge base is empty, routing to external tools.",
-                "top_chunk_preview": "",
-            }
+            # 2. Check Milvus availability
+            if not is_available():
+                decision = {
+                    "path": "tool",
+                    "similarity_score": 0.0,
+                    "reason": "Vector database unavailable, routing to external tools.",
+                    "top_chunk_preview": "",
+                }
+                print(f"[Router] Final Routing Decision: {decision}")
+                return decision
 
-        if not has_collection or doc_count == 0:
-            logger.info("Router: knowledge base is empty — routing to tool")
-            return {
-                "path": "tool",
-                "similarity_score": 0.0,
-                "reason": "Knowledge base is empty, routing to external tools.",
-                "top_chunk_preview": "",
-            }
+            # Check collection exists
+            if not collection_exists():
+                decision = {
+                    "path": "tool",
+                    "similarity_score": 0.0,
+                    "reason": "Knowledge base is empty, routing to external tools.",
+                    "top_chunk_preview": "",
+                }
+                print(f"[Router] Final Routing Decision: {decision}")
+                return decision
 
-        # ── Embed query and search ─────────────────────────────────────
-        try:
+            # 3. Check document count
+            count = get_document_count()
+            print(f"[Router] Documents in collection: {count}")
+            if count == 0:
+                decision = {
+                    "path": "tool",
+                    "similarity_score": 0.0,
+                    "reason": "Knowledge base is empty, routing to external tools.",
+                    "top_chunk_preview": "",
+                }
+                print(f"[Router] Final Routing Decision: {decision}")
+                return decision
+
+            # 4. Embed query, search Milvus top_k=1
+            print("[Router] Embedding query...")
             query_embedding = embed_query(query)
-            results = search_documents(query_embedding, top_k=1)
-        except Exception as exc:
-            logger.warning("Router: search failed: %s — routing to tool", exc)
-            return {
+            
+            try:
+                results = search_documents(query_embedding, top_k=1, source=source)
+                print(f"[Router] Search results: {results}")
+            except Exception as e:
+                logger.error("Milvus search exception: %s", e)
+                decision = {
+                    "path": "tool",
+                    "similarity_score": 0.0,
+                    "reason": f"A database exception occurred during vector search: {e}. Safely degrading to external tools.",
+                    "top_chunk_preview": "",
+                }
+                print(f"[Router] Final Routing Decision: {decision}")
+                return decision
+
+            # 4.5. Check for document keywords (Smart Tool Routing)
+            query_lower = query.lower()
+            doc_keywords = [
+                "document", "pdf", "resume", "cv", "uploaded file", 
+                "this file", "this document", "projects in the document"
+            ]
+            has_doc_keywords = any(kw in query_lower for kw in doc_keywords)
+
+            # 5. If results empty
+            if not results:
+                if has_doc_keywords and count > 0:
+                    decision = {
+                        "path": "direct",
+                        "similarity_score": 0.0,
+                        "reason": "No results returned but document keywords detected; blocking web search.",
+                        "top_chunk_preview": "",
+                        "direct_message": "I found documents in the knowledge base but retrieval confidence was low. Please rephrase your question or specify the document name."
+                    }
+                else:
+                    decision = {
+                        "path": "tool",
+                        "similarity_score": 0.0,
+                        "reason": "No results returned from vector search",
+                        "top_chunk_preview": "",
+                    }
+                print(f"[Router] Final Routing Decision: {decision}")
+                return decision
+
+            # 6. Extract score
+            distance = results[0]["distance"]
+            similarity = results[0]["similarity"]  # 1.0 - distance
+            print(f"[Router] distance={distance:.4f}, similarity={similarity:.4f}, strict_threshold={STRICT_THRESHOLD}")
+
+            # 7. Decide path based on similarity threshold
+            if similarity >= STRICT_THRESHOLD:
+                path = "rag"
+                reason = f"Relevant context found (similarity: {similarity:.3f} >= strict threshold: {STRICT_THRESHOLD})"
+                top_chunk_preview = results[0]["text"][:100]
+            elif similarity >= SOFT_THRESHOLD:
+                path = "rag"
+                reason = f"Attempting RAG with soft match (similarity: {similarity:.3f} >= soft threshold: {SOFT_THRESHOLD})"
+                top_chunk_preview = results[0]["text"][:100]
+            else:
+                if has_doc_keywords and count > 0:
+                    path = "direct"
+                    reason = "Low similarity but document keywords detected; blocking web search."
+                    top_chunk_preview = ""
+                    decision = {
+                        "path": path,
+                        "similarity_score": similarity,
+                        "reason": reason,
+                        "top_chunk_preview": top_chunk_preview,
+                        "direct_message": "I found documents in the knowledge base but retrieval confidence was low. Please rephrase your question or specify the document name."
+                    }
+                    print(f"[Router] Final Routing Decision: {decision}")
+                    return decision
+                else:
+                    path = "tool"
+                    reason = f"Low similarity (similarity: {similarity:.3f} < soft threshold: {SOFT_THRESHOLD})"
+                    top_chunk_preview = ""
+
+            decision = {
+                "path": path,
+                "similarity_score": similarity,
+                "reason": reason,
+                "top_chunk_preview": top_chunk_preview,
+            }
+            print(f"[Router] Final Routing Decision: {decision}")
+            return decision
+
+        except Exception as e:
+            logger.error("Routing error encountered: %s", e, exc_info=True)
+            decision = {
                 "path": "tool",
                 "similarity_score": 0.0,
-                "reason": f"Search failed ({exc}), routing to external tools.",
+                "reason": f"Routing failed with error: {e}",
                 "top_chunk_preview": "",
             }
-
-        # No results from search
-        if not results:
-            logger.info("Router: search returned no results — routing to tool")
-            return {
-                "path": "tool",
-                "similarity_score": 0.0,
-                "reason": f"No relevant context found (no search results, threshold: {self._threshold})",
-                "top_chunk_preview": "",
-            }
-
-        # ── Extract similarity score ───────────────────────────────────
-        top_result = results[0]
-        similarity = top_result.get("similarity", 0.0)
-        top_text = top_result.get("text", "")
-        preview = top_text[:100] if top_text else ""
-
-        # ── Make routing decision ──────────────────────────────────────
-        if similarity >= self._threshold:
-            path = "rag"
-            reason = (
-                f"Found relevant context "
-                f"(similarity: {similarity:.3f} >= threshold: {self._threshold})"
-            )
-            logger.info("Router: %s — routing to RAG", reason)
-        else:
-            path = "tool"
-            reason = (
-                f"No relevant context found "
-                f"(similarity: {similarity:.3f} < threshold: {self._threshold})"
-            )
-            logger.info("Router: %s — routing to tool", reason)
-            preview = ""  # Don't expose irrelevant chunks
-
-        return {
-            "path": path,
-            "similarity_score": similarity,
-            "reason": reason,
-            "top_chunk_preview": preview,
-        }
+            print(f"[Router] Final Routing Decision: {decision}")
+            return decision
