@@ -45,16 +45,26 @@ def call_with_fallback(prompt: str) -> Dict[str, object]:
                 "fallback_triggered": False,
             }
         # Empty/whitespace response — trigger fallback
+        print(f"[Fallback] Primary LLM ({PRIMARY_MODEL}) returned empty response — triggering fallback to {FALLBACK_MODEL}")
         logger.warning(
             "Primary LLM (%s) returned empty response — triggering fallback",
             PRIMARY_MODEL,
         )
     except Exception as exc:
-        logger.warning(
-            "Primary LLM (%s) failed: %s — triggering fallback",
-            PRIMARY_MODEL,
-            exc,
-        )
+        err_msg = str(exc)
+        if "429" in err_msg or "ResourceExhausted" in err_msg or "resource_exhausted" in err_msg.lower():
+            print(f"[Fallback] Gemini rate limit hit (ResourceExhausted 429). Triggering intentional failover to Groq ({FALLBACK_MODEL}).")
+            logger.warning(
+                "[Fallback] Gemini rate limit hit (ResourceExhausted 429). Triggering intentional failover to Groq (%s).",
+                FALLBACK_MODEL,
+            )
+        else:
+            print(f"[Fallback] Primary LLM ({PRIMARY_MODEL}) failed: {exc}. Triggering fallback to Groq ({FALLBACK_MODEL}).")
+            logger.warning(
+                "Primary LLM (%s) failed: %s — triggering fallback",
+                PRIMARY_MODEL,
+                exc,
+            )
 
     # ── Try fallback (Groq) ────────────────────────────────────────────
     try:
