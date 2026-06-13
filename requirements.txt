@@ -1,7 +1,7 @@
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
 streamlit>=1.41.0
-pymilvus>=2.5.0
+pymilvus[milvus_lite]>=2.5.0
 milvus-lite>=3.0
 sentence-transformers>=3.3.0
 google-generativeai>=0.8.0

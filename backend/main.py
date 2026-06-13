@@ -49,10 +49,9 @@ async def lifespan(app: FastAPI):
                 ensure_collection()
                 logger.info("✅ Collection '%s' ready", COLLECTION_NAME)
             except Exception as exc:
-                logger.error("❌ Failed to ensure collection '%s': %s", COLLECTION_NAME, exc)
+                logger.error("❌ Milvus unavailable: Failed to ensure collection '%s': %s", COLLECTION_NAME, exc)
         else:
-            logger.warning("❌ Milvus unavailable: milvus_lite may not be installed. "
-                           "Install with: pip install 'pymilvus[milvus_lite]'")
+            logger.error("❌ Milvus unavailable: milvus_lite package is not installed or functional.")
     except Exception as exc:
         logger.error("❌ Milvus unavailable: %s", exc)
 
@@ -61,9 +60,9 @@ async def lifespan(app: FastAPI):
         from backend.ingestion.embedding import embed_query
         test_embedding = embed_query("startup test")
         if test_embedding and len(test_embedding) == 384:
-            logger.info("✅ Embedding model loaded (dimension: 384)")
+            logger.info("✅ Embedding model loaded")
         else:
-            logger.warning("❌ Embedding model returned unexpected output")
+            logger.error("❌ Embedding model failed to load: returned unexpected embedding dimension")
     except Exception as exc:
         logger.error("❌ Embedding model failed to load: %s", exc)
 
