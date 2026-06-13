@@ -1,0 +1,90 @@
+"""
+FastAPI application entry point.
+
+Creates the app, configures CORS, includes routes, and ensures
+required directories and the Milvus collection exist on startup.
+"""
+
+import logging
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from backend.api.routes import router
+from backend.config import FASTAPI_PORT
+from backend.vectordb.milvus_client import ensure_collection
+
+# ── Logging configuration ─────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s │ %(levelname)-8s │ %(name)s │ %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
+
+# ── Startup / Shutdown lifecycle ───────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifecycle: setup on startup, cleanup on shutdown."""
+    # ── Startup ────────────────────────────────────────────────────
+    logger.info("Starting Agentic RAG application...")
+
+    # Create required directories
+    Path("data").mkdir(exist_ok=True)
+    Path("logs").mkdir(exist_ok=True)
+    logger.info("Ensured data/ and logs/ directories exist")
+
+    # Initialise Milvus collection
+    try:
+        ensure_collection()
+        logger.info("Milvus collection ready")
+    except Exception as exc:
+        logger.error("Failed to initialise Milvus collection: %s", exc)
+
+    logger.info("Agentic RAG application started successfully")
+    yield
+
+    # ── Shutdown ───────────────────────────────────────────────────
+    logger.info("Shutting down Agentic RAG application")
+
+
+# ── FastAPI application ────────────────────────────────────────────────────
+
+app = FastAPI(
+    title="Mini Agentic RAG",
+    description=(
+        "A production-ready mini agentic RAG application with intelligent routing, "
+        "LLM fallback, tool use (calculator + web search), and structured tracing."
+    ),
+    version="1.0.0",
+    lifespan=lifespan,
+)
+
+# ── CORS middleware (allow all origins for development) ────────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Include routes ─────────────────────────────────────────────────────────
+app.include_router(router)
+
+
+# ── Uvicorn runner ─────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        "backend.main:app",
+        host="0.0.0.0",
+        port=FASTAPI_PORT,
+        reload=True,
+    )
