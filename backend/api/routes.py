@@ -11,9 +11,7 @@ from typing import Dict, List, Optional
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
-from backend.agent.router import RouterAgent
-from backend.agent.rag_agent import run_rag
-from backend.agent.tool_agent import run_tool
+from backend.agent.agent import RAGAgent
 from backend.ingestion.pdf_loader import load_pdf
 from backend.ingestion.url_loader import load_url
 from backend.ingestion.chunking import chunk_texts
@@ -138,54 +136,72 @@ async def load_documents(
 
 # ── POST /query ────────────────────────────────────────────────────────────
 
+
+def _get_routing_type(selected_tools: List[str]) -> str:
+    """Derive a categorical routing type from the selected tools list."""
+    if len(selected_tools) > 1:
+        return "multi_tool"
+    return selected_tools[0] if selected_tools else "unknown"
+
+
 @router.post("/query", response_model=QueryResponse)
 async def query_documents(request: QueryRequest):
-    """Process query using RAG or Tool agent with tracing."""
-    query_text = request.query.strip()
-    if not query_text:
+    """Process query using the single-agent architecture with tracing."""
+    if not request.query or not request.query.strip():
         raise HTTPException(status_code=400, detail="Query cannot be empty")
 
+    query_text = request.query.strip()
     trace_id = trace_manager.start_trace(query_text)
 
     try:
-        routing = RouterAgent().route(query_text, request.source)
+        agent = RAGAgent()
+        result = agent.run(query_text, source=request.source)
 
         trace_manager.update_trace(
             trace_id,
-            retrieval_hit=(routing["path"] == "rag"),
-            similarity_score=routing["similarity_score"],
-            path_taken=routing["path"],
-            routing_reason=routing["reason"],
-        )
-
-        if routing["path"] == "rag":
-            agent_result = run_rag(query_text, request.source)
-            tool_used = None
-        elif routing["path"] == "direct":
-            agent_result = {
-                "answer": routing.get("direct_message", "Request blocked."),
-                "model_used": "system",
-                "fallback_triggered": False,
-                "chunks_used": 0,
-            }
-            tool_used = None
-        else:
-            agent_result = run_tool(query_text)
-            tool_used = agent_result.get("tool_used")
-
-        trace_manager.update_trace(
-            trace_id,
-            primary_model=agent_result["model_used"],
-            fallback_triggered=agent_result["fallback_triggered"],
-            tool_used=tool_used,
-            chunks_used=agent_result.get("chunks_used"),
+            # New fields
+            selected_tools=result["selected_tools"],
+            tool_reasoning=result["tool_reasoning"],
+            routing_decision_timestamp=result["routing_decision_timestamp"],
+            routing_method=result["routing_method"],
+            routing_type=_get_routing_type(result["selected_tools"]),
+            tool_execution_results={
+                k: str(v)[:500]
+                for k, v in result["tool_execution_results"].items()
+            },
+            tool_execution_status=result["tool_execution_status"],
+            # Backward-compatible existing fields
+            tool_used=result["selected_tools"][0] if result["selected_tools"] else None,
+            path_taken="+".join(result["selected_tools"]),
+            retrieval_hit=result["retrieval_hit"],
+            similarity_score=result.get("top_similarity_score", 0.0),
+            primary_model=result["model_used"],
+            fallback_triggered=result["fallback_triggered"],
+            chunks_used=result.get("chunks_used", 0),
+            # New diagnostic fields
+            gemini_status=result.get("gemini_status", "not_attempted"),
+            knowledge_base_attempted=result.get("knowledge_base_attempted", False),
+            knowledge_base_selected=result.get("knowledge_base_selected", False),
+            knowledge_base_results_found=result.get("knowledge_base_results_found", 0),
+            web_search_results_count=result.get("web_search_results_count", 0),
+            tool_failure_reason=result.get("tool_failure_reason"),
+            routing_explanation=result.get("routing_explanation", ""),
+            documents_indexed_at_query_time=result.get("documents_indexed_at_query_time", 0),
+            document_relevance_score=result.get("document_relevance_score", 0.0),
+            # Phase 2 Evidence diagnostics
+            top_similarity_score=result.get("top_similarity_score", 0.0),
+            top_chunk_source=result.get("top_chunk_source", "N/A"),
+            top_chunk_preview=result.get("top_chunk_preview", "N/A"),
+            source_filter_used=result.get("source_filter_used"),
+            retrieved_chunk_count=result.get("retrieved_chunk_count", 0),
         )
 
         trace = trace_manager.finish_trace(trace_id)
-        return QueryResponse(answer=agent_result["answer"], trace=trace)
+        return QueryResponse(answer=result["answer"], trace=trace)
 
     except Exception as exc:
         logger.error("Query API failed: %s", exc, exc_info=True)
+        traceback.print_exc()
         try:
             trace_manager.update_trace(trace_id, error=str(exc))
             trace_manager.finish_trace(trace_id)
@@ -193,7 +209,7 @@ async def query_documents(request: QueryRequest):
             pass
         raise HTTPException(
             status_code=500,
-            detail=f"Query processing failed: {exc}",
+            detail=f"Query failed: {str(exc)}",
         )
 
 

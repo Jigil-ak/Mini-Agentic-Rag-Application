@@ -198,6 +198,28 @@ def insert_documents(
     return count
 
 
+def _format_search_hits(search_results) -> List[Dict[str, Any]]:
+    """Format raw search results from Milvus client."""
+    formatted_hits: List[Dict[str, Any]] = []
+    if search_results and len(search_results) > 0:
+        for hit in search_results[0]:
+            # Handle both dictionary-key access and object-attribute access seamlessly
+            distance = hit.get("distance", 1.0) if isinstance(hit, dict) else getattr(hit, "distance", 1.0)
+            entity = hit.get("entity", {}) if isinstance(hit, dict) else getattr(hit, "entity", {})
+            
+            text = entity.get("text", "") if isinstance(entity, dict) else getattr(entity, "text", "")
+            source = entity.get("source", "") if isinstance(entity, dict) else getattr(entity, "source", "")
+            
+            normalized_similarity = 1.0 - distance
+            formatted_hits.append({
+                "text": text,
+                "source": source,
+                "distance": distance,
+                "similarity": max(0.0, min(1.0, normalized_similarity))
+            })
+    return formatted_hits
+
+
 def search_documents(
     query_embedding: List[float],
     top_k: int = 3,
@@ -231,8 +253,13 @@ def search_documents(
         "limit": top_k,
         "output_fields": ["text", "source"],
     }
+    
     if source:
-        search_kwargs["filter"] = f'source == "{source}"'
+        escaped_source = source.replace('"', '\\"')
+        search_kwargs["filter"] = f'source == "{escaped_source}"'
+        logger.info("[MilvusClient] Searching with source filter: '%s'", source)
+    else:
+        logger.info("[MilvusClient] Searching without source filter")
 
     # Wrap client search in try/except with fallback
     try:
@@ -254,24 +281,45 @@ def search_documents(
             logger.error("[MilvusClient] Fallback search failed: %s", fallback_exc)
             raise fallback_exc
 
-    formatted_hits: List[Dict[str, Any]] = []
+    formatted_hits = _format_search_hits(search_results)
 
-    if search_results and len(search_results) > 0:
-        for hit in search_results[0]:
-            # Handle both dictionary-key access and object-attribute access seamlessly
-            distance = hit.get("distance", 1.0) if isinstance(hit, dict) else getattr(hit, "distance", 1.0)
-            entity = hit.get("entity", {}) if isinstance(hit, dict) else getattr(hit, "entity", {})
-            
-            text = entity.get("text", "") if isinstance(entity, dict) else getattr(entity, "text", "")
-            source = entity.get("source", "") if isinstance(entity, dict) else getattr(entity, "source", "")
-            
-            normalized_similarity = 1.0 - distance
-            formatted_hits.append({
-                "text": text,
-                "source": source,
-                "distance": distance,
-                "similarity": max(0.0, min(1.0, normalized_similarity))
-            })
+    retrieved_chunk_count = len(formatted_hits)
+    top_similarity = formatted_hits[0]["similarity"] if retrieved_chunk_count > 0 else 0.0
+    top_source = formatted_hits[0]["source"] if retrieved_chunk_count > 0 else "N/A"
+    top_chunk_preview = formatted_hits[0]["text"][:100] if retrieved_chunk_count > 0 else "N/A"
+
+    logger.info(
+        "[MilvusClient] search_documents output - retrieved_chunk_count=%d, "
+        "top_similarity=%.4f, top_source='%s', top_chunk_preview='%s'",
+        retrieved_chunk_count, top_similarity, top_source, top_chunk_preview
+    )
+
+    # Parallel comparison check when source filter is active
+    if source:
+        no_filter_kwargs = {
+            "collection_name": COLLECTION_NAME,
+            "data": [query_embedding],
+            "limit": top_k,
+            "output_fields": ["text", "source"],
+        }
+        try:
+            raw_no_filter = client.search(
+                **no_filter_kwargs,
+                search_params={"metric_type": "COSINE", "params": {"nprobe": 16}},
+            )
+            no_filter_hits = _format_search_hits(raw_no_filter)
+            logger.info(
+                "[MilvusClient] Source comparison - with_filter_count=%d, without_filter_count=%d",
+                retrieved_chunk_count, len(no_filter_hits)
+            )
+            if retrieved_chunk_count == 0 and len(no_filter_hits) > 0:
+                logger.warning(
+                    "[MilvusClient] Filter '%s' returned 0 results, but search without filter returned %d results! "
+                    "Top unfiltered source: '%s', top similarity: %.4f",
+                    source, len(no_filter_hits), no_filter_hits[0]["source"], no_filter_hits[0]["similarity"]
+                )
+        except Exception as comp_exc:
+            logger.warning("[MilvusClient] Failed parallel comparison search: %s", comp_exc)
 
     return formatted_hits
 

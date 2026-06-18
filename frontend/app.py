@@ -7,12 +7,14 @@ Communicates with the FastAPI backend over HTTP. Provides:
 - Bottom section: Recent trace log table
 """
 
+import os
+
 import requests
 import streamlit as st
 
 # ── Configuration ──────────────────────────────────────────────────────────
 
-BASE_URL = "http://127.0.0.1:8000"
+BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8000")
 
 # ── Page config ────────────────────────────────────────────────────────────
 
@@ -268,59 +270,140 @@ if ask_clicked and query and query.strip():
 
         # ── Display trace ───────────────────────────────────────────
         trace = result.get("trace", {})
-        with st.expander("🔍 Query Trace", expanded=True):
-            col1, col2 = st.columns(2)
+        with st.expander("🔍 Agent Trace", expanded=True):
+            if trace:
+                col1, col2 = st.columns(2)
+                with col1:
+                    # Tools Used with status
+                    tools = trace.get("selected_tools", [])
+                    st.markdown("**🛠️ Tools Used:**")
+                    icons = {
+                        "knowledge_base": "📚 Knowledge Base",
+                        "web_search": "🌐 Web Search",
+                        "calculator": "🧮 Calculator",
+                    }
+                    for t in tools:
+                        status = trace.get("tool_execution_status", {}).get(t, "unknown")
+                        status_icon = "✅" if status == "success" else "⚠️" if status == "empty" else "❌"
+                        st.markdown(f"- {icons.get(t, t)} {status_icon} `{status}`")
 
-            with col1:
-                # Retrieval Hit
-                retrieval_hit = trace.get("retrieval_hit", False)
-                st.markdown(f"**Retrieval Hit:** {'✅ Yes' if retrieval_hit else '❌ No'}")
-
-                # Path Taken
-                path = trace.get("path_taken", "unknown")
-                if path == "rag":
+                    # Routing type
+                    routing_type = trace.get("routing_type", "unknown")
+                    routing_colors = {
+                        "knowledge_base": "🟢",
+                        "web_search": "🔵",
+                        "calculator": "🟡",
+                        "multi_tool": "🟣",
+                        "unknown": "⚪",
+                    }
                     st.markdown(
-                        '**Path Taken:** <span class="trace-path-rag">📚 RAG</span>',
-                        unsafe_allow_html=True,
-                    )
-                else:
-                    st.markdown(
-                        '**Path Taken:** <span class="trace-path-tool">🔧 Tool</span>',
-                        unsafe_allow_html=True,
+                        f"**🛣️ Routing Type:** {routing_colors.get(routing_type, '⚪')} `{routing_type}`"
                     )
 
-                # Model Used
-                model = trace.get("primary_model", "unknown")
-                st.markdown(f"**Model Used:** `{model}`")
+                    # Routing method (LLM vs fallback)
+                    routing_method = trace.get("routing_method", "unknown")
+                    if routing_method == "keyword_fallback":
+                        st.warning("⚠️ LLM routing unavailable — keyword fallback used")
+                    else:
+                        st.success("✅ LLM-based routing")
 
-                # Fallback
-                fallback = trace.get("fallback_triggered", False)
-                st.markdown(f"**Fallback:** {'✅ Triggered' if fallback else '❌ No'}")
+                    # KB Retrieval
+                    hit = trace.get("retrieval_hit", False)
+                    st.markdown(f"**📥 KB Retrieval:** {'✅ Hit' if hit else '❌ Miss'}")
 
-            with col2:
-                # Similarity Score
-                similarity = trace.get("similarity_score", 0.0)
-                st.markdown(f"**Similarity Score:** `{similarity:.4f}`")
-                st.progress(min(similarity, 1.0))
+                    # Model
+                    st.markdown(f"**🤖 Model:** `{trace.get('primary_model', 'unknown')}`")
 
-                # Latency
-                latency = trace.get("response_time_ms", 0.0)
-                if latency >= 1000:
-                    st.markdown(f"**Latency:** `{latency / 1000:.2f}s`")
-                else:
-                    st.markdown(f"**Latency:** `{latency:.0f}ms`")
+                    # Fallback
+                    fb = trace.get("fallback_triggered", False)
+                    st.markdown(f"**🔄 Fallback:** {'⚠️ Groq (rate limit)' if fb else '✅ Gemini'}")
 
-                # Tool Used
-                tool = trace.get("tool_used")
-                if tool:
-                    st.markdown(f"**Tool Used:** `{tool}`")
-                else:
-                    st.markdown("**Tool Used:** _None_")
+                    # Latency
+                    st.markdown(f"**⚡ Latency:** `{trace.get('response_time_ms', 0):.0f}ms`")
 
-                # Routing Reason
-                reason = trace.get("routing_reason", "")
-                if reason:
-                    st.markdown(f"**Routing Reason:** _{reason}_")
+                    # Gemini Status
+                    gemini_status = trace.get("gemini_status", "not_attempted")
+                    gemini_icons = {
+                        "success": "🟢 success",
+                        "rate_limited": "⚠️ rate_limited",
+                        "failed": "🔴 failed",
+                        "not_attempted": "⏭️ not_attempted"
+                    }
+                    st.markdown(f"**🔑 Gemini Status:** `{gemini_icons.get(gemini_status, gemini_status)}`")
+
+                    # Docs Indexed
+                    docs_indexed = trace.get("documents_indexed_at_query_time", 0)
+                    st.markdown(f"**📦 Docs Indexed:** `{docs_indexed}`")
+
+                    # Document Relevance Score
+                    relevance_score = trace.get("document_relevance_score", 0.0)
+                    st.markdown(f"**🎯 Doc Relevance Score:** `{relevance_score:.4f}`")
+
+                    # Phase 2 Evidence
+                    top_sim = trace.get("top_similarity_score", 0.0)
+                    if top_sim:
+                        st.markdown(f"**📈 Top Similarity Score:** `{top_sim:.4f}`")
+                    
+                    top_src = trace.get("top_chunk_source", "N/A")
+                    if top_src != "N/A":
+                        st.markdown(f"**📄 Top Chunk Source:** `{top_src}`")
+                        
+                    src_filter = trace.get("source_filter_used")
+                    if src_filter:
+                        st.markdown(f"**🔍 Source Filter Used:** `{src_filter}`")
+                        
+                    retrieved_chunks = trace.get("retrieved_chunk_count", 0)
+                    if retrieved_chunks:
+                        st.markdown(f"**📚 Chunks Retrieved:** `{retrieved_chunks}`")
+
+                    top_preview = trace.get("top_chunk_preview", "N/A")
+                    if top_preview != "N/A":
+                        with st.expander("📝 Top Chunk Preview"):
+                            st.caption(top_preview)
+
+                with col2:
+                    # Agent reasoning
+                    st.markdown("**🧠 Agent Reasoning:**")
+                    st.info(trace.get("tool_reasoning", "No reasoning recorded"))
+
+                    st.markdown(f"**🛣️ Path:** `{trace.get('path_taken', 'unknown')}`")
+
+                    rdt = trace.get("routing_decision_timestamp", "")
+                    if rdt:
+                        st.markdown(f"**🕐 Decision Time:** `{rdt}`")
+
+                    chunks = trace.get("chunks_used", 0)
+                    if chunks:
+                        st.markdown(f"**📄 Chunks Used:** `{chunks}`")
+
+                    # Routing Explanation
+                    routing_explanation = trace.get("routing_explanation", "")
+                    if routing_explanation:
+                        st.markdown("**📋 Routing Explanation:**")
+                        st.info(routing_explanation)
+
+                    # Web Search Results Count
+                    if "web_search" in trace.get("selected_tools", []):
+                        ws_count = trace.get("web_search_results_count", 0)
+                        st.markdown(f"**🔍 Web Results:** `{ws_count}`")
+
+                    # KB Results Found
+                    if "knowledge_base" in trace.get("selected_tools", []):
+                        kb_found = trace.get("knowledge_base_results_found", 0)
+                        st.markdown(f"**📚 KB Results Found:** `{kb_found}`")
+
+                    # Tool Failure Reason
+                    failure_reason = trace.get("tool_failure_reason")
+                    if failure_reason:
+                        st.warning(f"⚠️ Tool Failure: {failure_reason}")
+
+                # Tool outputs (full width below columns)
+                tool_results = trace.get("tool_execution_results", {})
+                if tool_results:
+                    st.markdown("**📊 Tool Outputs:**")
+                    for tool_name, output in tool_results.items():
+                        with st.expander(f"Output: {tool_name}"):
+                            st.text(str(output)[:1000])
 
 elif ask_clicked:
     st.warning("⚠️ Please enter a question first.")
@@ -334,15 +417,16 @@ with st.expander("📋 Recent Traces", expanded=False):
         # Build a table from traces
         table_data = []
         for t in reversed(traces):
+            selected = t.get("selected_tools", [])
             table_data.append({
                 "Time": t.get("timestamp", "")[:19],
                 "Query": t.get("query", "")[:60],
-                "Path": t.get("path_taken", ""),
-                "Similarity": f"{t.get('similarity_score', 0.0):.3f}",
+                "Routing": t.get("routing_type", t.get("path_taken", "")),
+                "Tools": ", ".join(selected) if selected else t.get("tool_used", "-") or "-",
+                "Method": t.get("routing_method", "-"),
                 "Model": t.get("primary_model", ""),
                 "Fallback": "Yes" if t.get("fallback_triggered") else "No",
                 "Latency": f"{t.get('response_time_ms', 0.0):.0f}ms",
-                "Tool": t.get("tool_used") or "-",
             })
         st.dataframe(table_data, use_container_width=True, hide_index=True)
     else:

@@ -58,3 +58,13 @@ def run_rag(query: str, source: str = None) -> Dict:
             "fallback_triggered": False,
             "sources": [],
         }
+"""
+You are a helpful assistant.
+
+Before every response:
+- If current time is between 5 AM and 12 PM, start with "Good Morning!"
+- If current time is between 12 PM and 5 PM, start with "Good Afternoon!"
+- Otherwise start with "Good Evening!"
+
+Answer only based on the provided context.
+"""

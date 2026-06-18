@@ -1,48 +1,50 @@
 # 🤖 Mini Agentic RAG Application
 
-A production-ready **Retrieval-Augmented Generation** application with intelligent query routing, LLM fallback resilience, tool use (calculator + web search), and structured tracing.
+A production-ready **Retrieval-Augmented Generation** application with a single-agent architecture, LLM-powered intent classification, tool execution (calculator + web search + knowledge base), dual LLM fallback, and structured tracing.
 
 ## ✨ Key Features
 
-- **Intelligent Routing** — Automatically decides between knowledge base (RAG) and tools (web search / calculator) based on retrieval similarity
+- **LLM-Powered Routing** — Gemini classifies user intent and selects tools; keyword-scoring fallback handles rate limits
+- **Single Agent with Tools** — One `RAGAgent` orchestrates KnowledgeBaseTool, WebSearchTool, and CalculatorTool
 - **Dual LLM with Fallback** — Primary: Google Gemini 2.0 Flash, Fallback: Groq Llama 3.1 8B. Seamless failover if primary is unavailable
 - **Multi-Source Ingestion** — Upload PDFs or scrape URLs into the vector knowledge base
 - **Safe Calculator** — AST-based math evaluator (no `eval()`) for arithmetic queries
 - **Web Search** — DuckDuckGo-powered search for queries outside the knowledge base
 - **Vector Search** — Milvus Lite with cosine similarity, no Docker required
-- **Structured Tracing** — Every query produces a JSONL trace with routing decisions, latency, and model info
-- **Modern UI** — Streamlit frontend with real-time trace visualisation
+- **Structured Tracing** — Every query produces a JSONL trace with routing decisions, tool execution status, latency, and model info
+- **Modern UI** — Streamlit frontend with real-time agent trace visualisation
+- **Docker Ready** — One Dockerfile, two-service docker-compose for easy deployment
 
 ## 🏗️ Architecture
 
 ```mermaid
 flowchart TD
     A["User Query"] --> B["FastAPI Backend"]
-    B --> C["RouterAgent"]
-    C --> D["Embed Query<br/>(all-MiniLM-L6-v2)"]
-    D --> E["Milvus Search<br/>(Cosine Similarity)"]
-    E --> F{similarity >= 0.6?}
+    B --> C["RAGAgent"]
+    C --> D["Intent Classification<br/>(Gemini LLM)"]
+    D -->|LLM Fails| E["Keyword Scoring<br/>(Fallback)"]
+    D --> F{"Select Tools"}
+    E --> F
 
-    F -->|Yes| G["RAG Agent"]
-    G --> H["Retrieve Top-K Chunks"]
-    H --> I["Build Context Prompt"]
+    F -->|Knowledge Base| G["KnowledgeBaseTool"]
+    G --> H["Embed Query<br/>(all-MiniLM-L6-v2)"]
+    H --> I["Milvus Search<br/>(Cosine Similarity)"]
 
-    F -->|No| J["Tool Agent"]
-    J --> K{Calculator or Search?}
-    K -->|Math Pattern| L["Calculator<br/>(ast evaluator)"]
-    K -->|General| M["Web Search<br/>(DuckDuckGo)"]
-    L --> N["Build Tool Prompt"]
-    M --> N
+    F -->|Web Search| J["WebSearchTool<br/>(DuckDuckGo)"]
+    F -->|Calculator| K["CalculatorTool<br/>(ast evaluator)"]
 
-    I --> O["Gemini 2.0 Flash"]
+    I --> L["Context Assembly"]
+    J --> L
+    K --> L
+
+    L --> M["Gemini 2.0 Flash"]
+    M -->|Fails| N["Groq Llama 3.1"]
+    M -->|Success| O["TraceManager"]
     N --> O
-    O -->|Fails| P["Groq Llama 3.1"]
-    O -->|Success| Q["TraceManager"]
-    P --> Q
 
-    Q --> R["JSONL Log"]
-    Q --> S["API Response"]
-    S --> T["Streamlit UI"]
+    O --> P["JSONL Log"]
+    O --> Q["API Response"]
+    Q --> R["Streamlit UI"]
 ```
 
 ## 📋 Prerequisites
@@ -209,14 +211,16 @@ curl http://localhost:8000/traces
 
 1. **User submits a query** via the Streamlit UI or API
 2. **TraceManager** starts a new trace record with a unique ID
-3. **RouterAgent** embeds the query using `all-MiniLM-L6-v2`
-4. **Milvus search** finds the most similar document chunk (cosine similarity)
-5. **Routing decision:**
-   - Similarity ≥ 0.6 → **RAG path**: retrieve top-K chunks, build context prompt
-   - Similarity < 0.6 → **Tool path**: detect calculator vs web search intent
-6. **LLM generation** with fallback: try Gemini first, fall back to Groq on failure
-7. **TraceManager** records the full trace (path, model, latency, scores) to JSONL
-8. **Response** is returned with the answer and complete trace metadata
+3. **RAGAgent** classifies intent using Gemini LLM (falls back to keyword scoring on failure)
+4. **Tool selection**: the agent picks one or more tools — `knowledge_base`, `web_search`, `calculator`
+5. **Tool execution**: each tool runs independently
+   - KnowledgeBaseTool embeds the query and searches Milvus (cosine similarity)
+   - WebSearchTool queries DuckDuckGo
+   - CalculatorTool evaluates arithmetic via safe AST parser
+6. **Context assembly**: tool outputs are combined into a structured prompt
+7. **LLM generation** with fallback: try Gemini first, fall back to Groq on failure
+8. **TraceManager** records the full trace (tools, routing method, model, latency, status) to JSONL
+9. **Response** is returned with the answer and complete trace metadata
 
 ## 🔀 Fallback Logic
 
@@ -241,17 +245,24 @@ Each query appends one JSON line to `logs/agent_logs.jsonl`:
   "trace_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
   "query": "What is machine learning?",
   "timestamp": "2024-01-15T10:30:00.123456+00:00",
-  "retrieval_hit": true,
-  "similarity_score": 0.847,
-  "path_taken": "rag",
-  "routing_reason": "Found relevant context (similarity: 0.847 >= threshold: 0.6)",
-  "tool_used": null,
+  "retrieval_hit": false,
+  "similarity_score": 0.0,
+  "path_taken": "web_search",
+  "routing_reason": "",
+  "tool_used": "web_search",
   "tool_output_preview": null,
   "primary_model": "gemini-2.0-flash",
   "fallback_triggered": false,
-  "chunks_used": 3,
+  "chunks_used": 0,
   "response_time_ms": 1423.56,
-  "error": null
+  "error": null,
+  "selected_tools": ["web_search"],
+  "tool_reasoning": "General knowledge question about machine learning",
+  "routing_decision_timestamp": "2024-01-15T10:30:00.000000+00:00",
+  "routing_method": "llm",
+  "routing_type": "web_search",
+  "tool_execution_results": {"web_search": "1. [Machine Learning]: ..."},
+  "tool_execution_status": {"web_search": "success"}
 }
 ```
 
@@ -260,15 +271,20 @@ Each query appends one JSON line to `logs/agent_logs.jsonl`:
 | `trace_id` | string | Unique UUID for this query |
 | `query` | string | The user's original question |
 | `timestamp` | string | ISO 8601 timestamp (UTC) |
-| `retrieval_hit` | bool | Whether the RAG path was taken |
-| `similarity_score` | float | Normalised cosine similarity (0.0–1.0) |
-| `path_taken` | string | `"rag"` or `"tool"` |
-| `routing_reason` | string | Human-readable routing explanation |
-| `tool_used` | string\|null | `"calculator"`, `"web_search"`, or null |
-| `tool_output_preview` | string\|null | First 200 chars of tool output |
+| `selected_tools` | list | Tools selected by the agent (e.g. `["web_search"]`) |
+| `routing_type` | string | `"knowledge_base"`, `"web_search"`, `"calculator"`, or `"multi_tool"` |
+| `routing_method` | string | `"llm"` (Gemini classified) or `"keyword_fallback"` |
+| `tool_reasoning` | string | Agent's explanation of tool selection |
+| `routing_decision_timestamp` | string | ISO timestamp of the routing decision |
+| `tool_execution_results` | object | Truncated tool outputs keyed by tool name |
+| `tool_execution_status` | object | Status per tool: `"success"`, `"empty"`, or `"failed"` |
+| `retrieval_hit` | bool | Whether KB retrieval returned results |
+| `similarity_score` | float | Cosine similarity score of the top chunk |
+| `path_taken` | string | Joined tool names (e.g. `"knowledge_base+web_search"`) |
+| `tool_used` | string\|null | First selected tool (backward compat) |
 | `primary_model` | string | LLM model that generated the response |
 | `fallback_triggered` | bool | Whether the fallback LLM was used |
-| `chunks_used` | int\|null | Number of RAG chunks used (null for tool path) |
+| `chunks_used` | int\|null | Number of RAG chunks used |
 | `response_time_ms` | float | Total query processing time in milliseconds |
 | `error` | string\|null | Error message if the query failed |
 
@@ -301,9 +317,10 @@ project/
 │   │   └── routes.py          # FastAPI endpoints
 │   ├── agent/
 │   │   ├── __init__.py
-│   │   ├── router.py          # Query routing (RAG vs Tool)
-│   │   ├── rag_agent.py       # RAG pipeline
-│   │   ├── tool_agent.py      # Tool selection + execution
+│   │   ├── agent.py           # Single RAGAgent (LLM routing + tool execution)
+│   │   ├── router.py          # Legacy threshold router (kept, not used)
+│   │   ├── rag_agent.py       # Legacy RAG pipeline (kept, not used)
+│   │   ├── tool_agent.py      # Legacy tool agent (kept, not used)
 │   │   └── fallback.py        # LLM fallback orchestration
 │   ├── ingestion/
 │   │   ├── __init__.py
@@ -338,10 +355,54 @@ project/
 │   └── test_url_loader.py
 ├── data/                      # Milvus Lite database (auto-created)
 ├── logs/                      # Trace logs (auto-created)
+├── Dockerfile                 # Single image for both services
+├── docker-compose.yml         # Backend + Frontend services
 ├── requirements.txt
 ├── .env.example
 └── README.md
 ```
+
+## 🐳 Docker Deployment
+
+Build and run both services with Docker Compose:
+
+```bash
+docker compose up --build
+```
+
+- **Backend**: `http://localhost:8000`
+- **Frontend**: `http://localhost:8501`
+
+To run in detached mode:
+
+```bash
+docker compose up --build -d
+```
+
+To stop:
+
+```bash
+docker compose down
+```
+
+The `data/` and `logs/` directories are mounted as volumes, so your Milvus database and trace logs persist across container restarts.
+
+## 🧠 Intent Classification System
+
+The agent uses a two-tier intent classification system:
+
+### Primary: LLM-Based Routing (Gemini)
+
+Gemini analyzes the query and selects tools from:
+- `knowledge_base` — personal documents, resumes, uploaded content
+- `web_search` — general knowledge, current events, technology explanations
+- `calculator` — arithmetic expressions and computation requests
+
+Multiple tools can be selected for comparison queries (e.g., "Compare my skills with industry trends" → `knowledge_base` + `web_search`).
+
+### Fallback: Keyword Scoring
+
+When Gemini is rate-limited (429) or unavailable, a keyword-scoring system takes over. The trace records `routing_method: "keyword_fallback"` so you can monitor how often this occurs.
 
 ## 📄 License
 

@@ -76,13 +76,13 @@ class TestToolRouting:
         mock_embed.return_value = [0.1] * 384
         mock_search.return_value = [
             {"text": "Irrelevant content", "source": "test.pdf",
-             "distance": 0.70, "similarity": 0.30}
+             "distance": 0.75, "similarity": 0.25}
         ]
 
         result = router.route("What is the weather today?")
 
         assert result["path"] == "tool"
-        assert result["similarity_score"] == 0.30
+        assert result["similarity_score"] == 0.25
         assert "no relevant context" in result["reason"].lower() or "similarity" in result["reason"].lower()
 
     @patch("backend.agent.router.is_available", return_value=True)

@@ -1,5 +1,10 @@
 """
 Router agent — decides whether to use RAG or tools for each query.
+
+Two thresholds provide a confidence-based routing strategy. 
+A high similarity score uses RAG confidently, a medium score still attempts retrieval because relevant information may exist, 
+and only very low scores route to tools. This improves retrieval quality and reduces unnecessary web searches.
+
 """
 
 import re

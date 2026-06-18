@@ -46,6 +46,30 @@ class TraceManager:
             "chunks_used": None,
             "response_time_ms": 0.0,
             "error": None,
+            # ── New fields (single-agent architecture) ─────────────
+            "selected_tools": [],
+            "tool_reasoning": "",
+            "routing_decision_timestamp": "",
+            "routing_method": "",               # "llm" or "keyword_fallback"
+            "routing_type": "",                  # "knowledge_base" | "web_search" | "calculator" | "multi_tool"
+            "tool_execution_results": {},
+            "tool_execution_status": {},
+            "gemini_status": "not_attempted",
+            "knowledge_base_attempted": False,
+            "knowledge_base_selected": False,
+            "knowledge_base_results_found": 0,
+            "web_search_results_count": 0,
+            "tool_failure_reason": None,
+            "routing_explanation": "",
+            "documents_indexed_at_query_time": 0,
+            "document_relevance_score": 0.0,
+            # ── Phase 2 Evidence diagnostics ────────────────────────
+            "top_similarity_score": 0.0,
+            "top_chunk_source": "N/A",
+            "top_chunk_preview": "N/A",
+            "source_filter_used": None,
+            "retrieved_chunk_count": 0,
+            # ── Internal (excluded from output) ────────────────────
             "_start_time": time.perf_counter(),
         }
         return trace_id
